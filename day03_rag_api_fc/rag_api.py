@@ -22,6 +22,7 @@ import torch
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import chromadb
 from chromadb.api.types import EmbeddingFunction
@@ -241,6 +242,7 @@ SYSTEM_PROMPT = (
 )
 
 def rag_with_fc(query: str, max_rounds=8) -> str:
+    """非流式 FC 问答（保留原端点）"""
     msgs = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": query},
@@ -258,6 +260,66 @@ def rag_with_fc(query: str, max_rounds=8) -> str:
             print(f"  🛠  {fname}({json.dumps(fargs, ensure_ascii=False)})")
             msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
     return msgs[-1].get("content", "")
+
+async def stream_rag(query: str, max_rounds=8):
+    """流式 FC 问答生成器。
+
+    中间轮（调工具）：非流式检测 tool_calls
+    最后一轮（生成回答）：流式逐 token 返回 SSE 事件
+
+    SSE 事件格式：
+      data: {"type": "tool", "name": "...", "args": {...}}
+      data: {"type": "token", "content": "..."}
+      data: {"type": "done"}
+    """
+    msgs = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": query},
+    ]
+
+    for _ in range(max_rounds):
+        # 第一步：非流式判断是否调工具
+        msg = call_llm(msgs, tools=TOOLS)
+
+        if msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                fname = tc["function"]["name"]
+                fargs = json.loads(tc["function"]["arguments"] or "{}")
+                yield f"data: {json.dumps({'type': 'tool', 'name': fname, 'args': fargs})}\n\n"
+                print(f"  🛠  {fname}({json.dumps(fargs, ensure_ascii=False)})")
+
+            msgs.append({"role": "assistant", "content": msg.get("content"), "tool_calls": msg["tool_calls"]})
+            for tc in msg["tool_calls"]:
+                fname = tc["function"]["name"]
+                fargs = json.loads(tc["function"]["arguments"] or "{}")
+                impl = TOOL_IMPLS.get(fname)
+                result = impl(**fargs) if impl else f"未知工具：{fname}"
+                msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
+            continue
+
+        # 第二步：无工具调用，流式返回最终回答
+        body = {
+            "model": "deepseek-v4-flash", "messages": msgs,
+            "temperature": 0.3, "thinking": {"type": "disabled"},
+            "stream": True,
+        }
+        async with httpx.AsyncClient(timeout=30) as ac:
+            async with ac.stream("POST", "https://api.deepseek.com/chat/completions",
+                json=body, headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"}) as resp:
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    piece = json.loads(data)
+                    delta = piece["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+        break
+
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 # =============================================
 # FastAPI 端点
@@ -283,9 +345,25 @@ class DocResponse(BaseModel):
 
 @app.post("/query")
 def query(req: QueryRequest):
+    """非流式问答（兼容旧客户端）"""
     if not req.question.strip():
         raise HTTPException(400, "问题不能为空")
     return {"answer": rag_with_fc(req.question)}
+
+@app.post("/query/stream")
+async def query_stream(req: QueryRequest):
+    """流式问答。返回 text/event-stream，前端可逐字渲染"""
+    if not req.question.strip():
+        raise HTTPException(400, "问题不能为空")
+    return StreamingResponse(
+        stream_rag(req.question),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @app.post("/doc")
 def add_doc(req: DocRequest):
@@ -308,7 +386,8 @@ if __name__ == "__main__":
     import uvicorn
     print("启动 RAG Agent API（Chroma 持久化）...")
     print(f"  知识库：{_doc_count()} 个块 → {CHROMA_DIR}")
-    print("  POST /query  →  Function Calling 问答")
+    print("  POST /query         →  Function Calling 问答（非流式）")
+    print("  POST /query/stream  →  流式 SSE 问答")
     print("  POST /doc    →  动态添加知识（重启不丢）")
     print("  GET  /health →  健康检查")
     uvicorn.run(app, host="0.0.0.0", port=8000)
