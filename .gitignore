@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 hf_cache/
 vectordb/
+chroma_db/

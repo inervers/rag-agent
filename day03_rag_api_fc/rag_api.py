@@ -1,9 +1,9 @@
-"""RAG API + Function Calling（文件持久化版）
+"""RAG API + Function Calling（Chroma 持久化版）
 
 工具：search_knowledge / add_document / summarize / translate
 端点：POST /query  POST /doc  GET /health
 
-数据持久化：向量存储在 vectordb/ 目录，重启不丢。
+Chroma 持久化：重启服务知识库不丢。
 """
 
 import sys, os, json
@@ -15,7 +15,6 @@ if os.path.isdir(_REAL_USER_SITE) and _REAL_USER_SITE not in sys.path:
 os.environ.setdefault("HF_HOME", r"C:\Users\inervers\Desktop\OH-WorkSpace\dl-learning\hf_cache")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
-import numpy as np
 import httpx
 from transformers import AutoTokenizer, AutoModel
 import torch
@@ -24,6 +23,8 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+import chromadb
+from chromadb.api.types import EmbeddingFunction
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 if not DEEPSEEK_API_KEY:
@@ -42,73 +43,41 @@ def embed_texts(texts):
         pooled = model(**inputs).last_hidden_state.mean(dim=1)
     return (pooled / torch.norm(pooled, dim=1, keepdim=True)).numpy()
 
+class MiniLMEmbedding(EmbeddingFunction):
+    """自定义嵌入函数，包装成 Chroma EmbeddingFunction 接口"""
+    def __call__(self, texts):
+        return embed_texts(texts).tolist()
+
 # =============================================
-# 文件持久化向量存储
+# Chroma 持久化向量存储
 # =============================================
-NP_DATA_DIR = os.path.join(os.path.dirname(__file__), "vectordb")
-os.makedirs(NP_DATA_DIR, exist_ok=True)
+CHROMA_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
+
+client = chromadb.PersistentClient(
+    path=CHROMA_DIR,
+    settings=chromadb.config.Settings(anonymized_telemetry=False),
+)
+collection = client.get_or_create_collection(
+    name="rag_knowledge",
+    embedding_function=MiniLMEmbedding(),
+)
+
 splitter = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20)
 
 
-class PersistentVectorStore:
-    """轻量文件持久化向量存储。
-
-    原理与 Chroma 相同：
-      - 向量存 .npy 文件
-      - 文档内容存 .json 文件
-      - 重启时自动从磁盘加载
-    """
-    def __init__(self, data_dir):
-        self.data_dir = data_dir
-        self.vectors_path = os.path.join(data_dir, "vectors.npy")
-        self.docs_path = os.path.join(data_dir, "documents.json")
-        self.documents: list[str] = []
-        self.vectors = np.empty((0, 384), dtype=np.float32)
-        self._load()
-
-    def _load(self):
-        if os.path.isfile(self.docs_path) and os.path.isfile(self.vectors_path):
-            self.documents = json.load(open(self.docs_path, "r", encoding="utf-8"))
-            self.vectors = np.load(self.vectors_path)
-            print(f"  加载持久化知识库：{len(self.documents)} 个块")
-
-    def _save(self):
-        json.dump(self.documents, open(self.docs_path, "w", encoding="utf-8"), ensure_ascii=False)
-        np.save(self.vectors_path, self.vectors)
-
-    def initialize(self, texts: list[str]):
-        """首次初始化（仅当存储为空时）"""
-        if len(self.documents) > 0:
-            return False
-        self.documents = texts
-        self.vectors = embed_texts(texts)
-        self._save()
-        return True
-
-    def append(self, text: str):
-        """追加单条文档"""
-        self.documents.append(text)
-        vec = embed_texts([text])
-        self.vectors = np.vstack([self.vectors, vec])
-        self._save()
-
-    def search(self, query: str, k=3) -> list[str]:
-        if not self.documents:
-            return []
-        q_vec = embed_texts([query])[0]
-        scores = np.dot(self.vectors, q_vec)
-        top_k = np.argsort(scores)[-k:][::-1]
-        return [self.documents[i] for i in top_k]
-
-    @property
-    def count(self) -> int:
-        return len(self.documents)
+def _doc_count() -> int:
+    try:
+        return collection.count()
+    except Exception:
+        return 0
 
 
-vstore = PersistentVectorStore(NP_DATA_DIR)
+def _doc_ids(start: int, n: int) -> list[str]:
+    return [f"doc_{start + i}" for i in range(n)]
 
-# 首次启动时加载初始知识库
-if vstore.count == 0:
+
+# 首次启动时加载初始知识库（集合为空才加载）
+if _doc_count() == 0:
     init_texts = [
         "Python was created by Guido van Rossum and first released in 1991. It is a high-level general-purpose programming language emphasizing code readability with significant indentation. Python supports multiple programming paradigms including structured, object-oriented, and functional programming. It has a large standard library and a vibrant ecosystem of third-party packages for web development, data science, machine learning, automation, and scientific computing.",
         "PyTorch was developed by Meta AI (Facebook AI Research) and released in 2016. It is an open-source machine learning framework that accelerates the path from research prototyping to production deployment. Key features include dynamic computation graphs (eager execution), GPU-accelerated tensor computation, automatic differentiation with Autograd, and a rich ecosystem including TorchVision, TorchText, and TorchAudio.",
@@ -118,11 +87,11 @@ if vstore.count == 0:
         "LangChain is an open-source framework designed to simplify the development of LLM applications. It provides modular abstractions for models, prompts, chains, memory, agents, and retrieval. LangChain supports LCEL (LangChain Expression Language) for composing pipelines with the pipe operator, integrated tool calling for agents, and native integration with vector stores, document loaders, and embedding models.",
     ]
     chunks = splitter.split_documents([Document(t) for t in init_texts])
-    texts = [c.page_content for c in chunks]
-    vstore.initialize(texts)
-    print(f"▶ 知识库初始化：{vstore.count} 个块，持久化于 {NP_DATA_DIR}")
+    ids = _doc_ids(1, len(chunks))
+    collection.add(ids=ids, documents=[c.page_content for c in chunks], metadatas=[{"source": "init"} for _ in chunks])
+    print(f"▶ Chroma 知识库初始化：{len(chunks)} 个块，{CHROMA_DIR}")
 else:
-    print(f"▶ 知识库已从磁盘加载：{vstore.count} 个块，{NP_DATA_DIR}")
+    print(f"▶ Chroma 知识库已存在：{_doc_count()} 个块，{CHROMA_DIR}")
 
 # =============================================
 # DeepSeek LLM
@@ -170,7 +139,7 @@ TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "add_document",
-        "description": "向知识库添加一条新知识，之后被 search_knowledge 可检索到。知识重启后不丢失",
+        "description": "向知识库添加一条新知识（Chroma 持久化，重启不丢），之后被 search_knowledge 可检索到",
         "parameters": {
             "type": "object",
             "properties": {
@@ -204,7 +173,8 @@ TOOLS = [
 # =============================================
 
 def _tool_search_knowledge(query: str) -> str:
-    docs = vstore.search(query)
+    results = collection.query(query_texts=[query], n_results=3)
+    docs = results.get("documents", [[]])[0]
     if not docs:
         return "知识库中未找到相关信息"
     return "\n".join(docs)
@@ -212,9 +182,10 @@ def _tool_search_knowledge(query: str) -> str:
 def _tool_add_document(title: str, content: str) -> str:
     full_text = f"{title}：{content}"
     chunks = splitter.split_documents([Document(full_text)])
-    for chunk in chunks:
-        vstore.append(chunk.page_content)
-    return f"成功添加文档「{title}」（{len(chunks)} 个分块），知识库共 {vstore.count} 个块"
+    start_id = _doc_count() + 1
+    ids = _doc_ids(start_id, len(chunks))
+    collection.add(ids=ids, documents=[c.page_content for c in chunks], metadatas=[{"source": title} for _ in chunks])
+    return f"成功添加文档「{title}」（{len(chunks)} 个分块），知识库共 {_doc_count()} 个块"
 
 def _tool_summarize(text: str) -> str:
     return _deepseek_ask(
@@ -243,7 +214,7 @@ SYSTEM_PROMPT = (
     "You are an AI assistant with dedicated tools for specific tasks.\n"
     "Available tools:\n"
     "  search_knowledge : search the vector knowledge base\n"
-    "  add_document     : add new knowledge to the vector knowledge base\n"
+    "  add_document     : add new knowledge to the vector knowledge base (persistent)\n"
     "  summarize        : summarize any text\n"
     "  translate        : translate text to another language\n\n"
     "Rules:\n"
@@ -279,7 +250,7 @@ def rag_with_fc(query: str, max_rounds=8) -> str:
 # FastAPI 端点
 # =============================================
 
-app = FastAPI(title="RAG Agent API (Persistent)", version="1.1.0")
+app = FastAPI(title="RAG Agent API (Chroma)", version="1.1.0")
 
 
 class QueryRequest(BaseModel):
@@ -308,22 +279,22 @@ def add_doc(req: DocRequest):
     if not req.title.strip() or not req.content.strip():
         raise HTTPException(400, "标题和内容不能为空")
     result = _tool_add_document(req.title, req.content)
-    return {"message": result, "total_chunks": vstore.count}
+    return {"message": result, "total_chunks": _doc_count()}
 
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "chunks": vstore.count,
+        "chunks": _doc_count(),
         "tools": list(TOOL_IMPLS.keys()),
-        "storage": "file_persistent",
-        "db_path": NP_DATA_DIR,
+        "storage": "chroma_persistent",
+        "db_path": CHROMA_DIR,
     }
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"启动 RAG Agent API（文件持久化）...")
-    print(f"  知识库：{vstore.count} 个块 → {NP_DATA_DIR}")
+    print("启动 RAG Agent API（Chroma 持久化）...")
+    print(f"  知识库：{_doc_count()} 个块 → {CHROMA_DIR}")
     print("  POST /query  →  Function Calling 问答")
     print("  POST /doc    →  动态添加知识（重启不丢）")
     print("  GET  /health →  健康检查")
