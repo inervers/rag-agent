@@ -1,7 +1,0 @@
-Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|██████████| 103/103 [00:00<00:00, 14034.15it/s]
-C:\Users\inervers\Desktop\OH-WorkSpace\rag-agent\day03_rag_api_fc\rag_api.py:76: DeprecationWarning: The class MiniLMEmbedding does not implement __init__. This will be required in a future version.
-  embedding_function=MiniLMEmbedding(),
-INFO:     Started server process [21272]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
