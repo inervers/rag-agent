@@ -19,17 +19,24 @@ if os.path.isdir(_REAL_USER_SITE) and _REAL_USER_SITE not in sys.path:
 
 import httpx
 
-# 优先从环境变量读取，否则从 .env 文件加载
+# 自动搜索 .env：从脚本目录往上找，直到 OH-WorkSpace 根目录
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 if not DEEPSEEK_API_KEY:
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.isfile(env_path):
-        for line in open(env_path, encoding="utf-8"):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                if k.strip() == "DEEPSEEK_API_KEY":
-                    DEEPSEEK_API_KEY = v.strip()
+    search_dir = os.path.dirname(__file__)
+    for _ in range(6):
+        env_path = os.path.join(search_dir, ".env")
+        if os.path.isfile(env_path):
+            for line in open(env_path, encoding="utf-8"):
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip() == "DEEPSEEK_API_KEY":
+                        DEEPSEEK_API_KEY = v.strip()
+            break
+        parent = os.path.dirname(search_dir)
+        if parent == search_dir:
+            break
+        search_dir = parent
 if not DEEPSEEK_API_KEY:
     print("需要设置 DeepSeek API Key，在 .env 文件中写入 DEEPSEEK_API_KEY=sk-xxx")
     exit(1)
