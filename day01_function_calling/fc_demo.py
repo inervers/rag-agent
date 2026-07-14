@@ -1,9 +1,14 @@
-"""L4-Day2: Function Calling（工具调用）
+"""Function Calling 演示 Day1：多工具组合版
 
-核心模式：
-  用户提问 → LLM 决定调哪个工具 → 执行工具 → 结果给 LLM → LLM 组织最终回答
+6 个工具，展示 LLM 如何组合多个工具完成复合任务：
+  - calculator     : 数学计算（已有的）
+  - get_weather    : 天气查询（已有的）
+  - search_knowledge : 知识库搜索（已有的）
+  - add_document   : 动态添加新知识（新增）
+  - summarize      : 文本摘要（新增）
+  - translate      : 翻译（新增）
 
-DeepSeek 支持 OpenAI 兼容的 function calling 协议。
+关键看点：LLM 可以串行链式调用（搜→摘要→翻译）和并行多工具调用。
 """
 
 import sys, os, json, math
@@ -23,7 +28,7 @@ if not DEEPSEEK_API_KEY:
         exit(1)
 
 # =============================================
-# 1. 定义工具（JSON Schema 格式）
+# 1. 定义工具
 # =============================================
 
 TOOLS = [
@@ -31,14 +36,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "calculator",
-            "description": "计算数学表达式的值。支持 +, -, *, /, **, sqrt, sin, cos",
+            "description": "数学计算，支持 +, -, *, /, **, sqrt, sin, cos",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "数学表达式，如 '3.14 * 2' 或 'sqrt(144)'",
-                    }
+                    "expression": {"type": "string", "description": "表达式如 '3.14 * 2'"},
                 },
                 "required": ["expression"],
             },
@@ -52,10 +54,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "城市名，如 'Beijing', 'Shanghai', 'Tokyo'",
-                    }
+                    "city": {"type": "string", "description": "城市名，如 'Beijing'"},
                 },
                 "required": ["city"],
             },
@@ -65,27 +64,77 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_knowledge",
-            "description": "搜索内部知识库，查找与问题相关的信息。知识库包含 Python、PyTorch、Transformer、RAG、Chroma、LangChain 等主题",
+            "description": "搜索内部知识库。知识库包含 Python、PyTorch、Transformer、RAG、Chroma、LangChain 等主题",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "搜索关键词",
-                    }
+                    "query": {"type": "string", "description": "搜索关键词"},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_document",
+            "description": "向知识库添加一条新的知识条目",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "知识条目标题"},
+                    "content": {"type": "string", "description": "知识条目的具体内容"},
+                },
+                "required": ["title", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "summarize",
+            "description": "对一段文字进行摘要总结",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "需要摘要的文本"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "translate",
+            "description": "将文本翻译为目标语言",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "需要翻译的文本"},
+                    "target_language": {"type": "string", "description": "目标语言，如 Chinese, Japanese, English, French"},
+                },
+                "required": ["text", "target_language"],
             },
         },
     },
 ]
 
 # =============================================
-# 2. 工具的具体实现
+# 2. 工具实现
 # =============================================
 
+# --- 工具间共享的知识库 ---
+_knowledge_base = [
+    "Python was created by Guido van Rossum in 1991.",
+    "PyTorch was developed by Meta AI. It provides GPU-accelerated tensor computation.",
+    "The Transformer architecture was introduced by Google in 2017. It uses self-attention.",
+    "RAG combines a retriever with a generator. The retriever finds relevant documents.",
+    "Chroma is an open-source vector database for AI applications.",
+    "LangChain is a framework for developing LLM applications with chains and agents.",
+]
+
 def tool_calculator(expression: str) -> str:
-    """执行数学计算"""
     allowed = {"sqrt": math.sqrt, "sin": math.sin, "cos": math.cos,
                "pi": math.pi, "e": math.e}
     try:
@@ -95,36 +144,73 @@ def tool_calculator(expression: str) -> str:
         return f"计算错误：{e}"
 
 def tool_get_weather(city: str) -> str:
-    """模拟天气查询（演示用）"""
     weather_data = {
-        "Beijing": "26°C, 晴",
-        "Shanghai": "30°C, 多云",
-        "Tokyo": "28°C, 小雨",
-        "London": "18°C, 阴",
-        "New York": "25°C, 晴间多云",
+        "Beijing": "26°C, 晴", "北京": "26°C, 晴",
+        "Shanghai": "30°C, 多云", "上海": "30°C, 多云",
+        "Tokyo": "28°C, 小雨", "东京": "28°C, 小雨",
+        "London": "18°C, 阴", "伦敦": "18°C, 阴",
+        "New York": "25°C, 晴间多云", "纽约": "25°C, 晴间多云",
     }
     result = weather_data.get(city, f"没有 {city} 的天气数据")
     return f"{city}：{result}"
 
 def tool_search_knowledge(query: str) -> str:
-    """搜索内部知识库"""
-    kb = [
-        "Python was created by Guido van Rossum in 1991.",
-        "PyTorch was developed by Meta AI. It provides GPU-accelerated tensor computation.",
-        "The Transformer architecture was introduced by Google in 2017. It uses self-attention.",
-        "RAG combines a retriever with a generator. The retriever finds relevant documents.",
-        "Chroma is an open-source vector database for AI applications.",
-        "LangChain is a framework for developing LLM applications with chains and agents.",
-    ]
-    # 简单关键词匹配
-    results = [doc for doc in kb if query.lower() in doc.lower()]
+    results = [doc for doc in _knowledge_base if query.lower() in doc.lower()]
     return "\n".join(results) if results else f"未找到与 '{query}' 相关的信息"
 
-# 工具名称 → 实现函数 映射
+def tool_add_document(title: str, content: str) -> str:
+    _knowledge_base.append(f"{title}：{content}")
+    return f"成功添加文档「{title}」，当前知识库共 {len(_knowledge_base)} 条"
+
+def tool_summarize(text: str) -> str:
+    """用 LLM 做摘要（复用 DeepSeek）"""
+    body = {
+        "model": "deepseek-v4-flash",
+        "messages": [
+            {"role": "system", "content": "You are a summarizer. Provide a concise summary in the same language as the text."},
+            {"role": "user", "content": f"Summarize this:\n\n{text}"},
+        ],
+        "temperature": 0.2,
+        "thinking": {"type": "disabled"},
+        "stream": False,
+    }
+    resp = httpx.post(
+        "https://api.deepseek.com/chat/completions",
+        json=body,
+        headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+def tool_translate(text: str, target_language: str) -> str:
+    """用 LLM 做翻译（复用 DeepSeek）"""
+    body = {
+        "model": "deepseek-v4-flash",
+        "messages": [
+            {"role": "system", "content": f"You are a professional translator. Translate the text to {target_language}. Output only the translation."},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0.2,
+        "thinking": {"type": "disabled"},
+        "stream": False,
+    }
+    resp = httpx.post(
+        "https://api.deepseek.com/chat/completions",
+        json=body,
+        headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
 TOOL_IMPLS = {
     "calculator": tool_calculator,
     "get_weather": tool_get_weather,
     "search_knowledge": tool_search_knowledge,
+    "add_document": tool_add_document,
+    "summarize": tool_summarize,
+    "translate": tool_translate,
 }
 
 # =============================================
@@ -134,7 +220,6 @@ TOOL_IMPLS = {
 client = httpx.Client(timeout=30)
 
 def call_llm(messages, tools=None):
-    """发起一次 LLM 调用，可选带 tools"""
     body = {
         "model": "deepseek-v4-flash",
         "messages": messages,
@@ -154,37 +239,32 @@ def call_llm(messages, tools=None):
     return resp.json()["choices"][0]["message"]
 
 # =============================================
-# 4. Function Calling 循环
+# 4. FC 循环
 # =============================================
 
-def run_with_tools(user_query: str, max_rounds=5):
-    """
-    Function Calling 主循环：
-    1. 用户提问
-    2. LLM 决定要不要调工具
-    3. 如果要调，解析工具名和参数 → 执行 → 结果送回 LLM
-    4. LLM 用工具结果组织最终回答
-    """
+def run_with_tools(user_query: str, max_rounds=8):
     messages = [
         {"role": "system", "content": "You are a helpful assistant with access to tools. "
-         "Use them when needed. Answer in the same language as the user."},
+         "Use them when needed. You can call multiple tools in parallel. "
+         "Answer in the same language as the user."},
         {"role": "user", "content": user_query},
     ]
 
-    print(f"\n{'=' * 55}")
+    print(f"\n{'='*55}")
     print(f"  用户：{user_query}")
 
     for turn in range(max_rounds):
         msg = call_llm(messages, tools=TOOLS)
 
-        # ── 情况 A：LLM 决定直接回答（没有 tool_calls） ──
         if not msg.get("tool_calls"):
             print(f"  🤖 回答：{msg['content']}\n")
             return msg["content"]
 
-        # ── 情况 B：LLM 想调工具 ──
-        # 先把 LLM 的 tool_calls 响应加入消息列表（只加一次）
-        assistant_msg = {"role": "assistant", "content": msg.get("content"), "tool_calls": msg["tool_calls"]}
+        assistant_msg = {
+            "role": "assistant",
+            "content": msg.get("content"),
+            "tool_calls": msg["tool_calls"],
+        }
         messages.append(assistant_msg)
 
         for tool_call in msg["tool_calls"]:
@@ -193,16 +273,15 @@ def run_with_tools(user_query: str, max_rounds=5):
 
             print(f"  🛠  调用工具：{func_name}({func_args})")
 
-            # 执行工具
             impl = TOOL_IMPLS.get(func_name)
             if impl:
                 result = impl(**func_args)
             else:
                 result = f"未知工具：{func_name}"
 
-            print(f"     → 结果：{result}")
+            result_preview = result[:80] + "..." if len(result) > 80 else result
+            print(f"     → {result_preview}")
 
-            # 工具执行结果送回 LLM
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
@@ -213,24 +292,24 @@ def run_with_tools(user_query: str, max_rounds=5):
     return messages[-1]["content"]
 
 # =============================================
-# 5. 演示
+# 5. 演示场景
 # =============================================
 
 print("=" * 55)
-print("Function Calling 演示")
+print("Function Calling 演示——多工具组合")
 print("=" * 55)
 
-# ── 场景 1：需要计算器 ──
-run_with_tools("计算 3.14 的平方乘以 2 等于多少？")
+# ── 场景 1：并行调用 ──
+run_with_tools("同时查一下北京和上海的天气")
 
-# ── 场景 2：需要查天气 ──
-run_with_tools("北京和东京的天气怎么样？")
+# ── 场景 2：动态加知识 ──
+run_with_tools("我想加一条知识：Kubernetes 是一个容器编排平台，由 Google 开源。然后搜一下看看能搜到吗？")
 
-# ── 场景 3：需要搜索知识库 ──
-run_with_tools("PyTorch 是哪个公司开发的？它有什么特点？")
+# ── 场景 3：链式组合（搜→摘要→翻译） ──
+run_with_tools("搜索关于 Transformer 的知识，然后用自己的话总结一遍，再翻译成中文")
 
-# ── 场景 4：不需要工具（纯 LLM 知识） ──
-run_with_tools("解释一下什么是神经网络？")
+# ── 场景 4：计算 + 搜索 并行 ──
+run_with_tools("计算 256 的平方根是多少？同时查一下 PyTorch 的相关知识。")
 
-# ── 场景 5：多步骤调用（先搜索再回答） ──
-run_with_tools("LangChain 和 Chroma 有什么关系？请先搜索知识库再回答。")
+# ── 场景 5：复合场景 ──
+run_with_tools("先加一条知识：FastAPI 是一个高性能 Python Web 框架，支持异步。然后查一下 FastAPI 能看到什么结果？")
