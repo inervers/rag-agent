@@ -82,12 +82,12 @@ vectorstore = VectorStore()
 
 # 初始化知识库
 init_docs = [
-    Document("Python was created by Guido van Rossum in 1991."),
-    Document("PyTorch was developed by Meta AI. It provides GPU-accelerated tensor computation."),
-    Document("The Transformer architecture was introduced by Google in 2017."),
-    Document("RAG combines a retriever with a generator."),
-    Document("Chroma is an open-source vector database for AI applications."),
-    Document("LangChain is a framework for developing LLM applications with chains and agents."),
+    Document("Python was created by Guido van Rossum and first released in 1991. It is a high-level general-purpose programming language emphasizing code readability with significant indentation. Python supports multiple programming paradigms including structured, object-oriented, and functional programming. It has a large standard library and a vibrant ecosystem of third-party packages for web development, data science, machine learning, automation, and scientific computing."),
+    Document("PyTorch was developed by Meta AI (Facebook AI Research) and released in 2016. It is an open-source machine learning framework that accelerates the path from research prototyping to production deployment. Key features include dynamic computation graphs (eager execution), GPU-accelerated tensor computation, automatic differentiation with Autograd, and a rich ecosystem including TorchVision, TorchText, and TorchAudio."),
+    Document("The Transformer architecture was introduced by Google in the 2017 paper 'Attention Is All You Need'. Unlike RNNs or CNNs, it relies entirely on self-attention mechanisms to process sequential data. The architecture consists of an encoder and decoder, each built from stacked layers of multi-head self-attention and feed-forward networks. It has become the foundation for modern NLP models like BERT, GPT, T5, and has been extended to computer vision (ViT) and other domains."),
+    Document("RAG (Retrieval-Augmented Generation) is a technique that combines a retriever and a generator. The retriever searches a knowledge base (like a vector database) for documents relevant to the user's question. These retrieved documents are then fed as context to the generator (an LLM) to produce an informed answer grounded in real sources. RAG reduces hallucination, enables knowledge updates without retraining, and allows citation of sources."),
+    Document("Chroma is an open-source vector database built specifically for AI applications. It provides efficient storage and retrieval of embeddings with support for cosine similarity, L2 distance, and inner product. Chroma supports persistent storage, metadata filtering, and can be used as a drop-in replacement for simple in-memory vector stores. It integrates natively with LangChain and LlamaIndex."),
+    Document("LangChain is an open-source framework designed to simplify the development of LLM applications. It provides modular abstractions for models, prompts, chains, memory, agents, and retrieval. LangChain supports LCEL (LangChain Expression Language) for composing pipelines with the pipe operator, integrated tool calling for agents, and native integration with vector stores, document loaders, and embedding models."),
 ]
 vectorstore.add_documents(splitter.split_documents(init_docs))
 print(f"▶ 知识库初始加载：{len(vectorstore.documents)} 个块，{vectorstore.vectors.shape[1]} 维")
@@ -212,13 +212,13 @@ SYSTEM_PROMPT = (
     "Available tools:\n"
     "  search_knowledge : search the vector knowledge base\n"
     "  add_document     : add new knowledge to the vector knowledge base\n"
-    "  summarize        : summarize any text (use this when user asks to summarize)\n"
-    "  translate        : translate text (use this when user asks to translate)\n\n"
+    "  summarize        : summarize any text\n"
+    "  translate        : translate text to another language\n\n"
     "Rules:\n"
     "1. FOR TECHNICAL QUESTIONS, ALWAYS use search_knowledge first.\n"
     "2. For greetings or casual chat, answer directly without tools.\n"
-    "3. When the user asks to SUMMARIZE something, call the summarize tool.\n"
-    "4. When the user asks to TRANSLATE something, call the translate tool.\n"
+    "3. When asked to SUMMARIZE something, you MUST call the summarize tool. Do not write the summary yourself.\n"
+    "4. When asked to TRANSLATE something to another language, you MUST call the translate tool. Do not translate yourself.\n"
     "5. You CAN chain multiple tools: search → summarize → translate.\n"
     "6. After adding a document, verify with search_knowledge.\n"
     "Answer in the same language as the user."
