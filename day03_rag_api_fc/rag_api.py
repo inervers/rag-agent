@@ -150,12 +150,12 @@ TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "summarize",
-        "description": "对一段文本进行摘要总结",
+        "description": "对一段文本进行摘要总结。当用户要求总结/摘要一段内容时，请调用此工具，不要自己写总结",
         "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
     }},
     {"type": "function", "function": {
         "name": "translate",
-        "description": "将文本翻译为目标语言",
+        "description": "将文本翻译为目标语言。当用户要求翻译时，请调用此工具，不要自己翻译",
         "parameters": {
             "type": "object",
             "properties": {
@@ -208,16 +208,19 @@ TOOL_IMPLS = {
 # =============================================
 
 SYSTEM_PROMPT = (
-    "You are an AI assistant with access to the following tools:\n"
-    "- search_knowledge: search the vector knowledge base (required for technical questions)\n"
-    "- add_document: add new knowledge to the vector knowledge base\n"
-    "- summarize: summarize any text\n"
-    "- translate: translate text to another language\n\n"
+    "You are an AI assistant with dedicated tools for specific tasks.\n"
+    "Available tools:\n"
+    "  search_knowledge : search the vector knowledge base\n"
+    "  add_document     : add new knowledge to the vector knowledge base\n"
+    "  summarize        : summarize any text (use this when user asks to summarize)\n"
+    "  translate        : translate text (use this when user asks to translate)\n\n"
     "Rules:\n"
-    "1. For technical questions about Python/PyTorch/Transformer/RAG/Chroma/LangChain, ALWAYS use search_knowledge.\n"
-    "2. For greetings or general chat, answer directly without tools.\n"
-    "3. You can combine multiple tools in the same turn.\n"
-    "4. After adding a document with add_document, you can verify with search_knowledge.\n"
+    "1. FOR TECHNICAL QUESTIONS, ALWAYS use search_knowledge first.\n"
+    "2. For greetings or casual chat, answer directly without tools.\n"
+    "3. When the user asks to SUMMARIZE something, call the summarize tool.\n"
+    "4. When the user asks to TRANSLATE something, call the translate tool.\n"
+    "5. You CAN chain multiple tools: search → summarize → translate.\n"
+    "6. After adding a document, verify with search_knowledge.\n"
     "Answer in the same language as the user."
 )
 
@@ -236,6 +239,7 @@ def rag_with_fc(query: str, max_rounds=8) -> str:
             fargs = json.loads(tc["function"]["arguments"] or "{}")
             impl = TOOL_IMPLS.get(fname)
             result = impl(**fargs) if impl else f"未知工具：{fname}"
+            print(f"  🛠  {fname}({json.dumps(fargs, ensure_ascii=False)})")
             msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
     return msgs[-1].get("content", "")
 
