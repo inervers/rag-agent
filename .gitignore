@@ -4,3 +4,5 @@ hf_cache/
 vectordb/
 chroma_db/
 .env
+*.log
+stream_out*
