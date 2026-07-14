@@ -47,39 +47,84 @@ if not DEEPSEEK_API_KEY:
     print("需要设置 DEEPSEEK_API_KEY")
     exit(1)
 
+import time as time_module
 import httpx
 from transformers import AutoTokenizer, AutoModel
 import torch
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 import chromadb
 from chromadb.api.types import EmbeddingFunction
 
 # =============================================
-# 鉴权中间件
+# 速率限制器
+# =============================================
+
+RATE_LIMIT = int(os.environ.get("RAG_RATE_LIMIT", "10"))  # 每分钟最多请求数
+WINDOW_SEC = 60
+
+class RateLimiter:
+    """滑动窗口速率限制器。记录每个 Key 的请求时间戳，超窗口的自动淘汰"""
+    def __init__(self):
+        self._records: dict[str, list[float]] = {}
+
+    def check(self, key: str) -> tuple[bool, int, int]:
+        """
+        返回：(是否允许, 当前窗口内已用次数, 限制次数)
+        """
+        now = time_module.time()
+        window_start = now - WINDOW_SEC
+
+        if key not in self._records:
+            self._records[key] = []
+
+        # 剔除窗口外的时间戳
+        self._records[key] = [t for t in self._records[key] if t > window_start]
+
+        used = len(self._records[key])
+        if used >= RATE_LIMIT:
+            return False, used, RATE_LIMIT
+
+        self._records[key].append(now)
+        return True, used + 1, RATE_LIMIT
+
+rate_limiter = RateLimiter()
+
+# =============================================
+# 鉴权 + 限流中间件
 # =============================================
 
 AUTH_HEADER = "X-API-Key"
 
-async def verify_api_key(request: Request, call_next):
-    """所有请求都检查 X-API-Key 头"""
-    # /health 允许不带 key
+async def security_middleware(request: Request, call_next):
+    """统一安全检查：鉴权 → 限流"""
+    # /health 允许不带 key 也不限流
     if request.url.path == "/health":
         return await call_next(request)
 
+    # 1. 鉴权
     api_key = request.headers.get(AUTH_HEADER)
     if not api_key:
-        from fastapi.responses import JSONResponse
         return JSONResponse(status_code=401, content={"error": "Missing X-API-Key header"})
-
     if api_key != RAG_API_KEY:
-        from fastapi.responses import JSONResponse
         return JSONResponse(status_code=403, content={"error": "Invalid API Key"})
 
-    return await call_next(request)
+    # 2. 限流
+    allowed, used, limit = rate_limiter.check(api_key)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={"error": f"Rate limit exceeded: {used}/{limit} per minute"},
+            headers={"X-RateLimit-Limit": str(limit), "X-RateLimit-Remaining": "0"},
+        )
+
+    response = await call_next(request)
+    response.headers["X-RateLimit-Limit"] = str(limit)
+    response.headers["X-RateLimit-Remaining"] = str(limit - used)
+    return response
 
 # =============================================
 # 嵌入模型
@@ -287,7 +332,7 @@ async def stream_rag(query: str):
 # =============================================
 
 app = FastAPI(title="RAG Agent API (Production)", version="1.2.0")
-app.middleware("http")(verify_api_key)
+app.middleware("http")(security_middleware)
 
 class QueryRequest(BaseModel):
     question: str
@@ -303,6 +348,7 @@ def health():
         "chunks": _doc_count(),
         "tools": list(TOOL_IMPLS.keys()),
         "auth_required": True,
+        "rate_limit": f"{RATE_LIMIT}/min",
     }
 
 @app.post("/query")
@@ -332,6 +378,7 @@ if __name__ == "__main__":
     import uvicorn
     print(f"启动 RAG Agent API（Production v1.2.0）...")
     print(f"  API Key 鉴权：启用")
+    print(f"  速率限制：{RATE_LIMIT} 次/分钟")
     print(f"  知识库：{_doc_count()} 个块")
     print(f"  POST /query         →  问答（需 X-API-Key 头）")
     print(f"  POST /query/stream  →  流式问答（需 X-API-Key 头）")
