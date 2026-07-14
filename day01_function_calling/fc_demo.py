@@ -19,13 +19,20 @@ if os.path.isdir(_REAL_USER_SITE) and _REAL_USER_SITE not in sys.path:
 
 import httpx
 
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+# 优先从环境变量读取，否则从 .env 文件加载
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 if not DEEPSEEK_API_KEY:
-    key = input("请输入 DeepSeek API Key: ").strip()
-    if key:
-        DEEPSEEK_API_KEY = key
-    else:
-        exit(1)
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.isfile(env_path):
+        for line in open(env_path, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                if k.strip() == "DEEPSEEK_API_KEY":
+                    DEEPSEEK_API_KEY = v.strip()
+if not DEEPSEEK_API_KEY:
+    print("需要设置 DeepSeek API Key，在 .env 文件中写入 DEEPSEEK_API_KEY=sk-xxx")
+    exit(1)
 
 # =============================================
 # 1. 定义工具

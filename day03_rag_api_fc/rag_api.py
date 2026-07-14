@@ -26,9 +26,22 @@ from pydantic import BaseModel
 import chromadb
 from chromadb.api.types import EmbeddingFunction
 
+# 优先从环境变量读取，否则从 .env 文件加载
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 if not DEEPSEEK_API_KEY:
-    print("请设置环境变量 DEEPSEEK_API_KEY")
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.isfile(env_path):
+        for line in open(env_path, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+        DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+
+if not DEEPSEEK_API_KEY:
+    print("需要设置 DeepSeek API Key")
+    print("  方式1：新建 .env 文件写入 DEEPSEEK_API_KEY=sk-xxx")
+    print("  方式2：命令行设置 $env:DEEPSEEK_API_KEY='sk-xxx'")
     exit(1)
 
 # =============================================

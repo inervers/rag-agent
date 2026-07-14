@@ -3,3 +3,6 @@ __pycache__/
 hf_cache/
 vectordb/
 chroma_db/
+
+.env
+chroma_db/
